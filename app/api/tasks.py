@@ -1,17 +1,18 @@
 import json
-import logging
 import uuid
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.bootstrap import STREAM_KEY
+from app.observability.metrics import tasks_total
 from app.redis_io.client import get_redis
 
-logger = logging.getLogger("classiq.api")
+log = structlog.get_logger("classiq.api")
 router = APIRouter()
 
 STATE_KEY_PREFIX = "state:"
@@ -53,18 +54,20 @@ async def submit_task(body: TaskCreate, r: Redis = Depends(get_redis)) -> TaskCr
     try:
         await r.xadd(STREAM_KEY, {"task_id": task_id}, maxlen=100_000, approximate=True)
     except RedisError as exc:
-        logger.error("task.enqueue_failed task_id=%s err=%s", task_id, exc)
+        log.error("task.enqueue_failed", task_id=task_id, err=str(exc))
         await r.hset(
             state_key,
             mapping={"status": "failed", "error": f"enqueue_failed: {exc}"},
         )
+        tasks_total.labels(event="failed").inc()
         raise HTTPException(status_code=503, detail="Failed to enqueue task.") from exc
 
-    logger.info(
-        "task.submitted task_id=%s qc_len=%d shots=%d",
-        task_id,
-        len(body.qc),
-        body.shots,
+    tasks_total.labels(event="accepted").inc()
+    log.info(
+        "task.accepted",
+        task_id=task_id,
+        qc_len=len(body.qc),
+        shots=body.shots,
     )
     return TaskCreated(task_id=task_id)
 

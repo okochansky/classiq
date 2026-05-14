@@ -35,6 +35,9 @@ services:
     environment:
       REDIS_URL: "redis://redis:6379/0"
       WORKER_ID: "worker-1"
+      METRICS_PORT: "8001"
+    expose:
+      - "8001"
     depends_on:
       redis:
         condition: service_healthy
@@ -46,14 +49,46 @@ services:
     environment:
       REDIS_URL: "redis://redis:6379/0"
       SWEEPER_ID: "sweeper-1"
-      # Demo-friendly defaults; in production tune higher (e.g. idle=120000,
-      # interval=15) so transient pauses don't trigger reclaim storms.
+      # Demo-friendly defaults; production tuning would raise idle (e.g. 120000)
+      # and interval (e.g. 15) so transient pauses don't trigger reclaim storms.
       SWEEPER_IDLE_MS: "10000"
       SWEEPER_INTERVAL_S: "2"
+      METRICS_PORT: "8001"
+    expose:
+      - "8001"
     depends_on:
       redis:
         condition: service_healthy
     stop_grace_period: 10s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=24h"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+      - worker
+      - sweeper
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
 
 volumes:
   redis-data:

@@ -1,20 +1,19 @@
 import asyncio
-import logging
 import os
 import signal
 import socket
 
+import structlog
 from redis.asyncio import Redis
 
 from app.bootstrap import GROUP_NAME, STREAM_KEY, ensure_group
+from app.core.logging import configure_logging
+from app.observability.server import start_metrics_server
 from app.processing import process_task
 from app.redis_io.client import close_redis, get_redis
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger("classiq.worker")
+configure_logging("worker")
+log = structlog.get_logger("classiq.worker")
 
 
 def _install_signals(stop: asyncio.Event) -> None:
@@ -41,23 +40,27 @@ async def run_once(r: Redis, consumer: str, block_ms: int = 2000) -> int:
 
 async def loop() -> None:
     worker_id = os.environ.get("WORKER_ID", f"worker-{socket.gethostname()}")
+    metrics_port = int(os.environ.get("METRICS_PORT", "8001"))
     stop = asyncio.Event()
     _install_signals(stop)
 
+    start_metrics_server(metrics_port)
+    structlog.contextvars.bind_contextvars(worker_id=worker_id)
+
     r = await get_redis()
     await ensure_group(r)
-    logger.info("worker.alive worker_id=%s", worker_id)
+    log.info("worker.alive", metrics_port=metrics_port)
 
     try:
         while not stop.is_set():
             try:
                 await run_once(r, worker_id, block_ms=2000)
             except Exception:
-                logger.exception("worker.loop_error")
+                log.exception("worker.loop_error")
                 await asyncio.sleep(1)
     finally:
         await close_redis()
-        logger.info("worker.exiting worker_id=%s", worker_id)
+        log.info("worker.exiting")
 
 
 def main() -> None:
