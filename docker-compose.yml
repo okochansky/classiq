@@ -1,0 +1,44 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  api:
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker.main"]
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      WORKER_ID: "worker-1"
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+
+volumes:
+  redis-data:
