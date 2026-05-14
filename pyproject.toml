@@ -34,3 +34,6 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "chaos: end-to-end recovery scenarios requiring a running compose stack (slow; opt in with --run-chaos)",
+]
