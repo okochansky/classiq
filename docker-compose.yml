@@ -41,7 +41,15 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/metrics"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # Generous grace so an in-flight simulation finishes & XACKs before SIGKILL.
+    # Anything still running past this lands in PEL; the sweeper recovers it.
+    stop_grace_period: 60s
 
   sweeper:
     build: .
@@ -59,7 +67,13 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/metrics"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    stop_grace_period: 15s
 
   prometheus:
     image: prom/prometheus:v2.55.1
