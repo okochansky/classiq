@@ -40,5 +40,20 @@ services:
         condition: service_healthy
     stop_grace_period: 30s
 
+  sweeper:
+    build: .
+    command: ["python", "-m", "app.sweeper.main"]
+    environment:
+      REDIS_URL: "redis://redis:6379/0"
+      SWEEPER_ID: "sweeper-1"
+      # Demo-friendly defaults; in production tune higher (e.g. idle=120000,
+      # interval=15) so transient pauses don't trigger reclaim storms.
+      SWEEPER_IDLE_MS: "10000"
+      SWEEPER_INTERVAL_S: "2"
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 10s
+
 volumes:
   redis-data:
