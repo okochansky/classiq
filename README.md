@@ -311,6 +311,46 @@ with a valid Bell-state distribution (only `00`/`11` outcomes, shots sum to
 
 ---
 
+## Scaling
+
+All three application services are stateless; horizontal scaling is a
+single `--scale` flag away:
+
+```bash
+docker compose up -d --scale worker=4 --scale sweeper=2
+```
+
+- `WORKER_ID` / `SWEEPER_ID` default to `<role>-${HOSTNAME}` so each
+  replica registers as a **distinct consumer** in the Redis Streams
+  consumer group (compose hands every replica a unique hostname).
+- The `worker` service uses `XREADGROUP COUNT=1`, so adding workers
+  linearly increases throughput up to the AerSimulator CPU budget per
+  replica.
+- The `sweeper` service uses `XAUTOCLAIM` which is atomic at the entry
+  level — multiple sweepers race safely; only one wins each reclaim.
+- Prometheus is configured to scrape `worker:8001` and `sweeper:8001`
+  via Docker's service DNS; for >1 replica per service in production,
+  switch to `dns_sd_configs` (or use the Kubernetes service-discovery
+  config) so every replica is scraped individually.
+
+## Robustness
+
+What happens when the world misbehaves:
+
+| Scenario | Outcome |
+| --- | --- |
+| Worker `SIGKILL`'d mid-execution | PEL retains the entry. Sweeper reclaims after `SWEEPER_IDLE_MS` and re-runs via `process_task`. Idempotency on terminal state prevents double-execution when the worker died AFTER `HSET completed` but BEFORE `XACK`. Proven by `scripts/chaos.sh`. |
+| Worker `SIGTERM` (graceful) | Current task finishes, terminal `HSET` + `XACK` fire, loop checks stop event, process exits. `stop_grace_period: 60s` buffers the in-flight simulation. |
+| Redis goes down | Global `RedisError` handler returns spec-shaped `{"status":"error","message":"Backend unavailable…"}` with HTTP 503. No 500-with-traceback leaks. Worker/sweeper loops catch the error, log `worker.loop_error`, sleep 1 s, retry. |
+| Malformed QASM3 | `process_task` catches `QASMExecutionError`, transitions state to `failed` with the parse-failure message. `XACK` fires (no retry storm). `GET /tasks/{id}` reports `{"status":"error","message":"QASM3 parse failed: …"}`. |
+| Oversized payload (> 1 MiB `qc`) | Pydantic returns HTTP 422 with a validation error before any Redis write. |
+| Out-of-range `shots` (≤ 0 or > 100 000) | Pydantic returns HTTP 422. |
+| Same task delivered twice (e.g. sweeper re-claim after slow XACK) | Idempotency short-circuit: terminal-state tasks are XACK'd without re-execution. `tasks_total{event="idempotent_ack"}` counter ticks for observability. |
+| `qiskit.qasm3.loads` raises an unexpected exception | Caught as a generic `Exception`, state set to `failed` with `unexpected: …`, logged with `log.exception` (stack trace in JSON), `XACK` fires. |
+| Worker container crashes / OOMs | Docker restarts it (`restart: unless-stopped`). Sweeper handles any task whose PEL entry the dead worker held. |
+| Submitted task takes > 3 attempts to complete | After the 4th delivery, `process_task` transitions state to `failed` with `max_retries_exceeded`. Stops the retry loop, surfaces through `GET`. |
+| All workers down for an extended window | New submissions queue on the stream. Sweeper alone won't help (it only reclaims from PEL, not the stream). Workers process the backlog when they come back. |
+
 ## Future work
 
 Things deliberately deferred for the 48-hour scope:

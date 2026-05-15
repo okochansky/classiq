@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from redis.exceptions import RedisError
 
 from app.api.tasks import router as tasks_router
 from app.bootstrap import ensure_group
@@ -30,6 +31,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Classiq QASM Runner", version="0.1.0", lifespan=lifespan)
 app.include_router(tasks_router)
+
+
+@app.exception_handler(RedisError)
+async def _redis_unavailable(request: Request, exc: RedisError) -> JSONResponse:
+    """Any uncaught Redis error becomes a spec-shaped 503 instead of a 500
+    leaking a traceback. Route handlers that need finer-grained recovery
+    (e.g. mark-state-failed-then-503) still catch RedisError locally."""
+    log.error("redis.unavailable", path=str(request.url.path), err=str(exc))
+    return JSONResponse(
+        status_code=503,
+        content={"status": "error", "message": "Backend unavailable. Please retry."},
+    )
 
 
 @app.middleware("http")

@@ -2,6 +2,7 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
     volumes:
       - redis-data:/data
     ports:
@@ -15,6 +16,7 @@ services:
   api:
     build: .
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -32,9 +34,12 @@ services:
   worker:
     build: .
     command: ["python", "-m", "app.worker.main"]
+    restart: unless-stopped
     environment:
       REDIS_URL: "redis://redis:6379/0"
-      WORKER_ID: "worker-1"
+      # WORKER_ID is intentionally NOT set: app.worker.main falls back to
+      # `worker-${HOSTNAME}` so `docker compose up -d --scale worker=N`
+      # gives each replica a distinct consumer name.
       METRICS_PORT: "8001"
     expose:
       - "8001"
@@ -54,9 +59,11 @@ services:
   sweeper:
     build: .
     command: ["python", "-m", "app.sweeper.main"]
+    restart: unless-stopped
     environment:
       REDIS_URL: "redis://redis:6379/0"
-      SWEEPER_ID: "sweeper-1"
+      # SWEEPER_ID intentionally unset — defaults to `sweeper-${HOSTNAME}`,
+      # so `--scale sweeper=N` gives each replica a distinct identity.
       # Demo-friendly defaults; production tuning would raise idle (e.g. 120000)
       # and interval (e.g. 15) so transient pauses don't trigger reclaim storms.
       SWEEPER_IDLE_MS: "10000"
@@ -77,6 +84,7 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.55.1
+    restart: unless-stopped
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=24h"
@@ -91,6 +99,7 @@ services:
 
   grafana:
     image: grafana/grafana:11.3.0
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:

@@ -26,8 +26,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# 1 MiB cap on the QASM payload — defends the API against pathological
+# bodies, and any sensible production circuit serializes well below this.
+QC_MAX_LEN = 1_048_576
+
+
 class TaskCreate(BaseModel):
-    qc: str = Field(min_length=1, description="Serialized QASM3 circuit.")
+    qc: str = Field(
+        min_length=1,
+        max_length=QC_MAX_LEN,
+        description="Serialized QASM3 circuit (up to 1 MiB).",
+    )
     shots: int = Field(default=1024, ge=1, le=100_000)
 
 
