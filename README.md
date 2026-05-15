@@ -162,7 +162,7 @@ sequenceDiagram
 
     Worker->>Redis: XREADGROUP claims T1 into PEL
     Worker->>Redis: HSET state:T1 status=running
-    Note over Worker: SIGKILL mid-execution — XACK never fires; T1 stuck in PEL
+    Note over Worker: SIGKILL mid-execution. XACK never fires. T1 stuck in PEL.
 
     loop every SWEEPER_INTERVAL_S (2s)
         Sweeper->>Redis: XAUTOCLAIM idle >= 10s
