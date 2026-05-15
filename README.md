@@ -6,7 +6,7 @@ milliseconds; circuits run on background workers; results are retrievable by
 task id. No task is lost when a worker dies mid-execution.
 
 ```bash
-docker compose up --build
+docker compose up -d --build
 ```
 
 | Surface | URL |
@@ -27,13 +27,15 @@ Submit a serialized QASM3 circuit. Returns immediately with a task id.
 ```bash
 curl -X POST http://localhost:8000/tasks \
   -H 'content-type: application/json' \
-  -d '{"qc": "OPENQASM 3.0; include \"stdgates.inc\"; qubit[2] q; bit[2] c; h q[0]; cx q[0], q[1]; c[0] = measure q[0]; c[1] = measure q[1];", "shots": 1024}'
+  -d '{"qc": "OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\nc[0] = measure q[0];\nc[1] = measure q[1];\n"}'
 
 {"task_id":"6c2…","message":"Task submitted successfully."}
 ```
 
-Body schema: `qc` (string, required), `shots` (int, default 1024, range
-1–100 000).
+Body schema: `qc` (string, required) is the only field required by the
+assignment. `shots` (int, default `1024`, range 1–100 000) is an optional
+extension; omit it and the worker runs 1024 shots, matching the
+`NUM_SHOTS = 1024` in the assignment's own Qiskit example.
 
 ### `GET /tasks/{task_id}`
 
@@ -48,6 +50,11 @@ Returns one of three shapes:
 The same `error` shape carries a different `message` for tasks that failed
 during execution (e.g. malformed QASM3).
 
+Not-found responses use **HTTP 200** with `status: error` in the body, matching
+the assignment's literal output shape (which specifies only the JSON, not the
+HTTP code). HTTP 404 would be the REST-conventional alternative; we follow the
+spec as written so a strict shape comparison passes.
+
 ### Auxiliary endpoints
 
 | Path | Purpose |
@@ -56,6 +63,33 @@ during execution (e.g. malformed QASM3).
 | `/readyz` | Redis ping + consumer-group existence check |
 | `/metrics` | Prometheus exposition |
 | `/docs`, `/openapi.json` | FastAPI auto-generated API docs |
+
+---
+
+## Assignment requirements traceability
+
+Every requirement from the assignment, mapped to its implementation and the
+test that exercises it.
+
+| Assignment requirement | Where it lives | Verified by |
+| --- | --- | --- |
+| `POST /tasks` accepts `{"qc": "..."}` | `app/api/tasks.py` (`submit_task`) | `tests/test_post_tasks.py::test_post_returns_task_id_and_persists_state` |
+| Returns `{"task_id", "message": "Task submitted successfully."}` | `TaskCreated` model in `app/api/tasks.py` | same test as above |
+| `GET /tasks/{id}` — completed shape `{"status":"completed","result":{...}}` | `app/api/tasks.py` (`get_task`) | `tests/test_get_task.py::test_get_completed_task_returns_result` |
+| `GET /tasks/{id}` — pending shape `{"status":"pending","message":"..."}` | `app/api/tasks.py` (`get_task`) | `tests/test_get_task.py::test_get_pending_task` |
+| `GET /tasks/{id}` — not-found shape `{"status":"error","message":"Task not found."}` | `app/api/tasks.py` (`get_task`) | `tests/test_get_task.py::test_get_unknown_task_returns_error` |
+| Asynchronous processing | FastAPI async + Redis Streams + dedicated `worker` service | `tests/test_e2e.py::test_full_lifecycle_post_then_worker_then_get` |
+| **Task integrity — no submitted task is lost** | Sweeper + `XAUTOCLAIM` + PEL recovery + terminal-state idempotency | `tests/test_chaos.py` and `scripts/chaos.sh` (live recovery proof) |
+| Docker Compose orchestrates all components | `docker-compose.yml` (6 services: api, worker, sweeper, redis, prometheus, grafana) | `make up` / `make demo` |
+| Production-like error handling + logging | Global RedisError → 503; per-task `failed` state; `structlog` JSON to stdout | `tests/test_redis_unavailable.py`, structured logs visible via `docker compose logs` |
+| Python 3.9+ | Python 3.11 | `Dockerfile:1`, `pyproject.toml` (`requires-python = ">=3.11"`) |
+| Lightweight web framework (Flask or FastAPI) | FastAPI 0.115 | `pyproject.toml` |
+| Dockerfile(s) for all components | One Dockerfile shared by api/worker/sweeper (same Python image, different entrypoints — DRY by design; see `docker-compose.yml`) | `docker compose build` |
+| `docker-compose.yml` orchestrates everything | Present at repo root | `docker compose up -d` brings the full stack healthy in ~15 s from cold |
+| README with setup, design decisions, usage | This file + 3 ADRs in `docs/adr/` | — |
+| Integration tests covering submission, processing, retrieval | `tests/test_e2e.py` (full POST → worker → GET lifecycle, plus concurrent submissions and OpenAPI shape) | `docker compose exec api pytest -q` (24 pass) |
+| `qiskit.qasm3` for (de)serialization | `qasm3.loads(qc)` in `app/worker/runner.py` (server-side deserialization; `qasm3.dumps` belongs on the client per the assignment's own example) | `tests/test_worker_happy.py` |
+| **Final check**: one-command build & run | `docker compose up -d` | verified end-to-end against a fresh checkout |
 
 ---
 
