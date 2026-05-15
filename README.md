@@ -155,25 +155,25 @@ sequenceDiagram
     participant Worker
     participant Sweeper
 
-    Client->>API: POST /tasks {qc}
-    API->>Redis: HSET state:T1 status=pending qc=…
-    API->>Redis: XADD tasks:stream {task_id:T1}
-    API-->>Client: 202 {task_id:T1}
+    Client->>API: POST /tasks (qc)
+    API->>Redis: HSET state:T1 status=pending qc=...
+    API->>Redis: XADD tasks:stream task_id=T1
+    API-->>Client: 202 task_id=T1
 
-    Worker->>Redis: XREADGROUP > (claims T1 into PEL)
+    Worker->>Redis: XREADGROUP claims T1 into PEL
     Worker->>Redis: HSET state:T1 status=running
-    Note over Worker: 💥 SIGKILL mid-execution<br/>(XACK never fires; T1 stuck in PEL)
+    Note over Worker: SIGKILL mid-execution — XACK never fires; T1 stuck in PEL
 
     loop every SWEEPER_INTERVAL_S (2s)
-        Sweeper->>Redis: XAUTOCLAIM idle ≥ 10s
+        Sweeper->>Redis: XAUTOCLAIM idle >= 10s
     end
     Sweeper->>Redis: XAUTOCLAIM finds T1
     Sweeper->>Redis: process_task (run on Aer)
-    Sweeper->>Redis: HSET state:T1 status=completed result=… + XACK
+    Sweeper->>Redis: HSET state:T1 status=completed result=... + XACK
 
     Client->>API: GET /tasks/T1
     API->>Redis: HGETALL state:T1
-    API-->>Client: 200 {status:completed, result:…}
+    API-->>Client: 200 status=completed result=...
 ```
 
 ---
