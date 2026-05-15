@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow-solid" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-recovery" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+    <marker id="arrow-metrics" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="600" y="36" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">Classiq QASM3 Task Runner — System Architecture</text>
+  <text x="600" y="58" text-anchor="middle" font-size="12" fill="#64748b">async task pipeline with at-least-once delivery and orphan recovery</text>
+
+  <!-- ============ CLIENT ============ -->
+  <rect x="60" y="120" width="140" height="90" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="130" y="155" text-anchor="middle" font-size="17" font-weight="700" fill="#0c4a6e">Client</text>
+  <text x="130" y="178" text-anchor="middle" font-size="11" fill="#0c4a6e">submits QASM3</text>
+  <text x="130" y="195" text-anchor="middle" font-size="11" fill="#0c4a6e">polls for result</text>
+
+  <!-- ============ API ============ -->
+  <rect x="280" y="120" width="180" height="120" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="370" y="155" text-anchor="middle" font-size="17" font-weight="700" fill="#1e3a8a">API</text>
+  <text x="370" y="178" text-anchor="middle" font-size="12" fill="#1e3a8a">FastAPI + uvicorn</text>
+  <text x="370" y="198" text-anchor="middle" font-size="11" fill="#1e3a8a">async I/O, port 8000</text>
+  <text x="370" y="218" text-anchor="middle" font-size="11" fill="#1e3a8a">Pydantic validation</text>
+
+  <!-- ============ REDIS (container) ============ -->
+  <rect x="540" y="80" width="320" height="420" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2.5"/>
+  <text x="700" y="112" text-anchor="middle" font-size="18" font-weight="700" fill="#78350f">Redis</text>
+  <text x="700" y="130" text-anchor="middle" font-size="11" fill="#92400e" font-style="italic">single source of truth</text>
+
+  <!-- state hash -->
+  <rect x="560" y="150" width="280" height="80" rx="8" fill="#fef9c3" stroke="#b45309" stroke-width="1.8"/>
+  <text x="700" y="176" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">state:{task_id}</text>
+  <text x="700" y="196" text-anchor="middle" font-size="11" fill="#78350f">hash — qc, status, result, attempts</text>
+  <text x="700" y="214" text-anchor="middle" font-size="11" fill="#78350f" font-style="italic">durable record per task</text>
+
+  <!-- tasks:stream -->
+  <rect x="560" y="250" width="280" height="80" rx="8" fill="#fef9c3" stroke="#b45309" stroke-width="1.8"/>
+  <text x="700" y="276" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">tasks:stream</text>
+  <text x="700" y="296" text-anchor="middle" font-size="11" fill="#78350f">Redis Stream — FIFO queue</text>
+  <text x="700" y="314" text-anchor="middle" font-size="11" fill="#78350f" font-style="italic">XADD enqueue, XREADGROUP consume</text>
+
+  <!-- PEL -->
+  <rect x="560" y="350" width="280" height="80" rx="8" fill="#fef9c3" stroke="#b45309" stroke-width="1.8"/>
+  <text x="700" y="376" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">Pending Entries List (PEL)</text>
+  <text x="700" y="396" text-anchor="middle" font-size="11" fill="#78350f">claimed-but-not-acked entries</text>
+  <text x="700" y="414" text-anchor="middle" font-size="11" fill="#78350f" font-style="italic">key to no-task-loss guarantee</text>
+
+  <!-- AOF note -->
+  <rect x="560" y="450" width="280" height="36" rx="6" fill="#fff7ed" stroke="#c2410c" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <text x="700" y="473" text-anchor="middle" font-size="11" fill="#78350f" font-style="italic">AOF persistence (appendonly yes) survives restarts</text>
+
+  <!-- ============ WORKER ============ -->
+  <rect x="940" y="120" width="200" height="120" rx="10" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="1040" y="155" text-anchor="middle" font-size="17" font-weight="700" fill="#14532d">Worker</text>
+  <text x="1040" y="178" text-anchor="middle" font-size="12" fill="#14532d">Qiskit AerSimulator</text>
+  <text x="1040" y="198" text-anchor="middle" font-size="11" fill="#14532d">consumer group: workers</text>
+  <text x="1040" y="218" text-anchor="middle" font-size="11" fill="#14532d" font-style="italic">scales horizontally (N replicas)</text>
+
+  <!-- "Worker may crash" note -->
+  <text x="1040" y="258" text-anchor="middle" font-size="11" fill="#dc2626" font-weight="600">⚡ may die mid-execution</text>
+
+  <!-- ============ SWEEPER ============ -->
+  <rect x="540" y="540" width="320" height="100" rx="10" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="700" y="572" text-anchor="middle" font-size="17" font-weight="700" fill="#7f1d1d">Sweeper</text>
+  <text x="700" y="595" text-anchor="middle" font-size="12" fill="#7f1d1d">orphan recovery — every 2s</text>
+  <text x="700" y="615" text-anchor="middle" font-size="11" fill="#7f1d1d">XAUTOCLAIM entries idle &gt; 10s</text>
+  <text x="700" y="632" text-anchor="middle" font-size="11" fill="#7f1d1d" font-style="italic">retries capped at 3 → status=failed</text>
+
+  <!-- ============ ARROWS — HAPPY PATH (solid) ============ -->
+
+  <!-- Client → API: POST /tasks -->
+  <line x1="200" y1="150" x2="280" y2="150" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="240" y="142" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">POST /tasks</text>
+
+  <!-- Client → API: GET /tasks/id -->
+  <line x1="200" y1="190" x2="280" y2="190" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="240" y="206" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">GET /tasks/id</text>
+
+  <!-- API → state hash: HSET -->
+  <line x1="460" y1="160" x2="560" y2="180" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="510" y="154" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">HSET / HGETALL</text>
+
+  <!-- API → tasks:stream: XADD -->
+  <line x1="460" y1="220" x2="560" y2="280" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="495" y="266" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">XADD</text>
+
+  <!-- tasks:stream → Worker: XREADGROUP -->
+  <line x1="840" y1="280" x2="940" y2="180" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="900" y="222" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">XREADGROUP</text>
+
+  <!-- Worker → state hash: HSET result + XACK (curves over top) -->
+  <path d="M 950 150 Q 900 80, 840 170" fill="none" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+  <text x="895" y="92" text-anchor="middle" font-size="11" font-weight="600" fill="#374151">HSET result + XACK</text>
+
+  <!-- ============ ARROWS — RECOVERY (dashed red) ============ -->
+
+  <!-- PEL → Sweeper: XAUTOCLAIM (vertical, downward) -->
+  <line x1="700" y1="430" x2="700" y2="540" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="7,4" marker-end="url(#arrow-recovery)"/>
+  <text x="715" y="465" font-size="11" font-weight="600" fill="#dc2626">XAUTOCLAIM</text>
+  <text x="715" y="482" font-size="11" fill="#dc2626">idle &gt; 10s</text>
+
+  <!-- Sweeper → state hash: process_task + XACK (curves up around left side) -->
+  <path d="M 560 580 Q 480 580, 470 460 Q 460 240, 560 200" fill="none" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="7,4" marker-end="url(#arrow-recovery)"/>
+  <text x="440" y="410" text-anchor="end" font-size="11" font-weight="600" fill="#dc2626">process_task</text>
+  <text x="440" y="427" text-anchor="end" font-size="11" font-weight="600" fill="#dc2626">+ HSET completed</text>
+  <text x="440" y="444" text-anchor="end" font-size="11" font-weight="600" fill="#dc2626">+ XACK</text>
+
+  <!-- ============ LEGEND ============ -->
+  <g transform="translate(60, 670)">
+    <text x="0" y="0" font-size="12" font-weight="700" fill="#0f172a">Flow legend:</text>
+
+    <line x1="90" y1="-4" x2="140" y2="-4" stroke="#374151" stroke-width="2" marker-end="url(#arrow-solid)"/>
+    <text x="148" y="0" font-size="11" fill="#0f172a">happy path</text>
+
+    <line x1="240" y1="-4" x2="290" y2="-4" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="7,4" marker-end="url(#arrow-recovery)"/>
+    <text x="298" y="0" font-size="11" fill="#0f172a">recovery (worker died → sweeper rescues task)</text>
+
+    <text x="0" y="22" font-size="11" fill="#475569" font-style="italic">Containerized via Docker Compose — api, worker(s), sweeper, redis, prometheus, grafana share one network</text>
+  </g>
+
+</svg>

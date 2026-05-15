@@ -95,6 +95,11 @@ test that exercises it.
 
 ## Architecture
 
+![System architecture](docs/architecture.svg)
+
+<details>
+<summary>Mermaid source (editable on GitHub)</summary>
+
 ```mermaid
 flowchart LR
     Client[client]
@@ -118,6 +123,8 @@ flowchart LR
     Prom -. scrape :8001 .-> Sweeper
     Graf --> Prom
 ```
+
+</details>
 
 Three application services share one image; each runs a different entrypoint:
 
