@@ -350,7 +350,7 @@ HTTP p95 by route.
 Inside the container:
 
 ```bash
-docker compose exec api pytest -q                # default — 21 pass, chaos skipped
+docker compose exec api pytest -q                # default — 24 pass, chaos skipped
 docker compose exec api pytest -q --run-chaos    # includes chaos (requires the host running compose)
 ```
 
@@ -620,7 +620,7 @@ by likely first need.
 # bring up the full stack
 docker compose up -d --build
 
-# run unit + integration tests (21 passing)
+# run unit + integration tests (24 passing)
 docker compose exec api pytest -q
 
 # tail correlated structured logs

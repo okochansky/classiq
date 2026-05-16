@@ -12,3 +12,7 @@ venv/
 .vscode/
 htmlcov/
 .coverage
+
+# Editor / tooling artifacts (not part of the deliverable)
+.a5c/
+.obsidian/
