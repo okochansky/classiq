@@ -7,6 +7,9 @@ _client: aioredis.Redis | None = None
 
 def _build() -> aioredis.Redis:
     url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    # decode_responses=True returns str instead of bytes — our values
+    # are all JSON strings, UUIDs, and status enums; bytes everywhere
+    # would force a .decode() on every read.
     return aioredis.from_url(url, decode_responses=True)
 
 

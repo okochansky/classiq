@@ -62,6 +62,9 @@ async def _metrics_middleware(request: Request, call_next):
     return response
 
 
+# Liveness probe — deliberately checks no dependencies. A Redis blip
+# must NOT cause every container's /healthz to fail simultaneously and
+# trigger a correlated restart storm. Dependency checks belong in /readyz.
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"status": "alive"}

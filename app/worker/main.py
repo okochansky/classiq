@@ -25,6 +25,10 @@ def _install_signals(stop: asyncio.Event) -> None:
 async def run_once(r: Redis, consumer: str, block_ms: int = 2000) -> int:
     """Single XREADGROUP iteration. Returns the number of entries processed.
     Extracted from the loop so tests can drive a single delivery deterministically."""
+    # count=1: prefetch-1 caps crash blast radius to one task per worker.
+    # block=block_ms (2s default): balances idle-Redis chatter against
+    #   SIGTERM responsiveness — the loop only checks `stop` between calls.
+    # ">" = "deliver only new entries to me" (vs replaying my own PEL).
     resp = await r.xreadgroup(
         GROUP_NAME, consumer, {STREAM_KEY: ">"}, count=1, block=block_ms
     )
@@ -53,6 +57,10 @@ async def loop() -> None:
 
     try:
         while not stop.is_set():
+            # Supervisor pattern: a single transient failure (Redis blip,
+            # unexpected exception) should not take the worker down.
+            # Docker would restart us, but logging + sleep + continue is
+            # cheaper than a container restart for a one-off error.
             try:
                 await run_once(r, worker_id, block_ms=2000)
             except Exception:

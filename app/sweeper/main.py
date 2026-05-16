@@ -31,6 +31,10 @@ async def sweep_once(
     """Reclaim PEL entries idle longer than `idle_ms` to this sweeper via
     XAUTOCLAIM, then process each via the shared `process_task`.
     Returns the number of entries processed in this cycle."""
+    # XAUTOCLAIM cursor protocol: start from "0-0", resume with the
+    # `new_cursor` returned by each call; a returned "0-0" means a full
+    # pass completed. Pagination bounds work per call so a huge backlog
+    # doesn't monopolize Redis or the event loop.
     cursor = "0-0"
     processed = 0
     while True:
@@ -45,6 +49,9 @@ async def sweep_once(
         if not claimed:
             break
         for entry_id, fields in claimed:
+            # Defensive: any stream entry without task_id was put there by
+            # something outside our producer (manual redis-cli poke). ACK
+            # so it doesn't loop in the PEL forever.
             task_id = fields.get("task_id")
             if not task_id:
                 log.warning("sweep.malformed_entry", entry_id=entry_id)
@@ -61,6 +68,9 @@ async def sweep_once(
 
 
 async def _update_gauges(r: Redis) -> None:
+    # Each probe is isolated in its own try: observability must never
+    # break the main flow, and a transient XPENDING failure shouldn't
+    # also lose the XLEN reading.
     try:
         pending = await r.xpending(STREAM_KEY, GROUP_NAME)
         stream_pending.set(pending.get("pending", 0))
@@ -102,6 +112,9 @@ async def loop() -> None:
                     log.info("sweep.cycle", processed=count)
             except Exception:
                 log.exception("sweeper.loop_error")
+            # Periodic tick + cancellable sleep in one construct: returns
+            # immediately on SIGTERM (stop.set()), or after `interval_s` if
+            # idle. TimeoutError = "tick fired, carry on".
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval_s)
             except asyncio.TimeoutError:

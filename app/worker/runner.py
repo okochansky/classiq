@@ -26,4 +26,7 @@ def execute_qasm3(qc: str, shots: int = DEFAULT_SHOTS) -> dict[str, int]:
     except Exception as exc:
         raise QASMExecutionError(f"Simulation failed: {exc}") from exc
 
+    # Coerce to stdlib types — Qiskit may return numpy ints / bytes-keys
+    # that json.dumps can't serialize. process_task writes this dict via
+    # json.dumps into the Redis state hash.
     return {str(k): int(v) for k, v in counts.items()}

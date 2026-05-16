@@ -26,17 +26,24 @@ async def process_task(
 ) -> None:
     """Process a single delivery of a task. Idempotent on terminal state.
     Per-task `attempts` counter caps retries at `max_attempts`."""
+    # Thread task_id / entry_id through every log line in this coroutine.
+    # Unbind in the outer finally so the next task doesn't inherit them.
     structlog.contextvars.bind_contextvars(task_id=task_id, entry_id=entry_id)
     try:
         state_key = f"state:{task_id}"
         state = await r.hgetall(state_key)
 
+        # Stream entry references a task whose state row was deleted
+        # (manual cleanup, schema bug). ACK to drop the orphan; nothing to retry.
         if not state:
             log.warning("task.unknown")
             tasks_total.labels(event="unknown_ack").inc()
             await r.xack(STREAM_KEY, GROUP_NAME, entry_id)
             return
 
+        # Idempotency: a re-delivery (sweeper reclaim) of a task whose worker
+        # died AFTER writing the terminal HSET but BEFORE XACK. Re-executing
+        # would overwrite a correct, already-durable result. Just ACK.
         status_value = state.get("status")
         if status_value in ("completed", "failed"):
             log.info("task.idempotent_ack", status=status_value)
@@ -44,7 +51,11 @@ async def process_task(
             await r.xack(STREAM_KEY, GROUP_NAME, entry_id)
             return
 
+        # HINCRBY is atomic — two sweepers racing to reclaim the same entry
+        # cannot lose a count via read-modify-write.
         attempts = int(await r.hincrby(state_key, "attempts", 1))
+        # Poison-message cap: a task whose worker keeps crashing on it
+        # transitions to terminal `failed` instead of looping forever.
         if attempts > max_attempts:
             await r.hset(
                 state_key,
@@ -88,6 +99,9 @@ async def process_task(
                 duration_s=round(elapsed, 4),
                 qubit_bucket=bucket,
             )
+        # Client-input error (malformed QASM, unsupported gate). Expected
+        # in normal operation — log at INFO so alerts on ERROR-rate stay
+        # actionable for real bugs.
         except QASMExecutionError as exc:
             await r.hset(
                 state_key,
@@ -99,6 +113,8 @@ async def process_task(
             )
             tasks_total.labels(event="failed").inc()
             log.info("task.failed", err=str(exc))
+        # Anything we didn't anticipate — bug, library upgrade, OOM.
+        # log.exception attaches the stack trace to the JSON record.
         except Exception as exc:
             await r.hset(
                 state_key,
@@ -111,6 +127,8 @@ async def process_task(
             tasks_total.labels(event="failed").inc()
             log.exception("task.unexpected_error")
         finally:
+            # ACK on every path: failure is durable in the state hash and
+            # is not a retry signal. The stream entry's job is done.
             await r.xack(STREAM_KEY, GROUP_NAME, entry_id)
     finally:
         structlog.contextvars.unbind_contextvars("task_id", "entry_id")
