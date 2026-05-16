@@ -352,6 +352,73 @@ with a valid Bell-state distribution (only `00`/`11` outcomes, shots sum to
 
 ---
 
+## Capacity & Bottlenecks (back-of-the-envelope)
+
+Numbers below are estimates for a **single 16-core / 32 GB host**, average circuit
+**10 qubits / 1024 shots**, simulation cost **~50 ms**. They're meant to identify
+the *order* in which things saturate, not as benchmark guarantees.
+
+### Per-component capacity
+
+| Component | Per-task cost | Max throughput (single replica) | What saturates first |
+| --- | --- | --- | --- |
+| **API** (FastAPI/uvicorn) | ~300 µs (2 Redis hops + parse) | ~10 000 POST/s, ~30 000 GET/s | CPU at ~4 uvicorn workers/host. Async I/O loop handles thousands of in-flight requests on one core because every step waits on Redis. |
+| **Worker** (Aer) | ~50 ms (simulation dominates) | **~20 tasks/s** | CPU pegged at 100% during simulation. **This is the bottleneck.** Scales linearly with replicas. |
+| **Sweeper** | trivial; XAUTOCLAIM only fires when PEL has stale entries | thousands of reclaims/s | Almost never bottleneck. One replica suffices for normal load. |
+| **Redis** | ~6 ops per task end-to-end | ~100 000 ops/s (single-threaded) | At ~16 000 tasks/s; we use ~2% of capacity on one host. |
+
+### Per-task latency budget
+
+| Step | Time | % of end-to-end |
+| --- | --- | --- |
+| API parse + Pydantic + HSET + XADD | ~300 µs | 0.6% |
+| Worker XREADGROUP wake | ~1 ms | 2% |
+| **Aer simulation** | **~50 ms** | **97%** |
+| Worker HSET result + XACK | ~200 µs | 0.4% |
+
+→ Server-side p95 ≈ **~50 ms**. Client-perceived latency adds polling jitter
+(0–1 s at 1 Hz); long-polling or SSE collapses that.
+
+### Sustained throughput on one box
+
+```
+16 cores × 20 tasks/sec per worker  =  ~320 tasks/sec sustained
+                                       (target 70-80% utilization → ~250 tasks/sec)
+```
+
+Heavier circuits scale as **2^n**:
+
+| Circuit size | Sim time | Tasks/sec on one 16-core box |
+| --- | --- | --- |
+| 10 qubits / 1024 shots | ~50 ms | **~320** |
+| 15 qubits / 1024 shots | ~500 ms | ~32 |
+| 20 qubits / 1024 shots | ~10 s | ~1.6 |
+| 25 qubits / 1024 shots | ~5 min | <0.1 |
+
+### When to grow horizontally
+
+| Symptom | Where to look | Threshold | Action |
+| --- | --- | --- | --- |
+| Queue growing without bound | `XLEN tasks:stream` (Grafana panel) | climbs and doesn't drain | **Add worker replicas** — `docker compose up -d --scale worker=N` |
+| Workers pegged | per-replica worker CPU | > 80% sustained | Add worker replicas |
+| Tail latency drift | `task_duration_seconds` p95 | rising without circuit-size change | Workers saturated; verify CPU, then add replicas |
+| Redis hot | Redis CPU / `INFO commandstats` latency | CPU > 70% or per-op > 1 ms | Vertical Redis first → read replicas for GET path → shard by stream key |
+| API CPU hot (rare) | api container CPU | > 60% sustained | `--scale api=N` behind a load balancer |
+| Stale in-flight work | `stream_pending` gauge | > 100 sustained | Investigate stuck workers; consider a second sweeper replica |
+
+### Order in which things actually break
+
+1. **Workers** (always first) — Aer is CPU-bound; horizontal scaling is the cheapest 10× gain.
+2. **Redis** — much later; vertical scaling first, then read replicas, then shard by stream.
+3. **API** — rare; one async uvicorn worker comfortably handles thousands of req/s.
+4. **Network** — never, at these payload sizes (~2 KB `qc`, ~500 B result).
+
+At **10× current load (~3 000 tasks/s of 10-qubit circuits):** ~10 worker boxes,
+2 API boxes, **one** Redis (still <30% loaded). Most production growth never
+touches anything except the worker count.
+
+---
+
 ## Scaling
 
 All three application services are stateless; horizontal scaling is a
