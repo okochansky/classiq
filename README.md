@@ -185,16 +185,88 @@ sequenceDiagram
 
 ---
 
-## Architectural Decisions
+## Architectural Decisions & Tradeoffs
 
-Detailed ADRs live in [`docs/adr/`](docs/adr/). The headline calls:
+Every decision below records: **what was chosen**, **what was rejected**,
+**the tradeoff we accepted**, and **what would change in a real production
+deployment**. The headline three also have full ADRs in
+[`docs/adr/`](docs/adr/).
 
-| Decision | Chosen | Rejected (why) |
-| --- | --- | --- |
-| **Async runtime** | **Custom Python worker on Redis Streams** | Celery (introduces a framework I'd be learning during a 48h deadline). RQ (similar issue plus weaker delivery semantics). Kafka (single-producer / single-consumer-group workload; the JVM compose footprint signals over-provisioning rather than rigor). Postgres `SELECT ... FOR UPDATE SKIP LOCKED` (excellent if Postgres were already justified by transactional state — it isn't here). |
-| **Task state** | **Redis hash (`state:{task_id}`)** | Postgres (adds a second datastore for a state machine with five fields; warranted at scale when audit/analytical queries appear). |
-| **No-task-loss mechanism** | **Sweeper + `XAUTOCLAIM` over the PEL** | Manual retry counters in Postgres (more correct, more code). Distributed locks (irrelevant — at-least-once delivery + idempotency at the consumer is the production pattern). |
-| **Observability** | **Prometheus + Grafana + structlog JSON to stdout** | Distributed tracing (Tempo/Jaeger gold-plating for a single-hop synchronous flow). ELK (Logstash is a 1 GB JVM tax for grok-parsing already-JSON logs — Filebeat → ES would be the production path). |
+### Async runtime — Redis Streams + a custom Python worker
+
+- **Chosen:** Redis Streams + a small async consumer (XREADGROUP / XACK / XAUTOCLAIM).
+- **Rejected:** Celery (a framework I'd be learning during a 48 h deadline; weaker reliability narrative for an interviewer), RQ (similar onboarding cost plus weaker delivery semantics), Kafka (single-producer / single-consumer-group workload; JVM footprint signals over-provisioning), Postgres `SELECT … FOR UPDATE SKIP LOCKED` (excellent if Postgres were already justified by transactional state — it isn't here).
+- **Tradeoff accepted:** No admin UI (Flower), no built-in retry-with-backoff, no DAG of dependent tasks, no scheduled/cron tasks. We hand-roll the sweeper instead.
+- **In production:** Same primitive at modest scale. Migrate to **Kafka** if retention > 24 h, replay, or multi-consumer fan-out becomes a requirement. The `process_task` boundary is the swap point.
+
+### API framework — FastAPI over Flask
+
+- **Chosen:** FastAPI + uvicorn (async).
+- **Rejected:** Flask (sync, thread-per-request).
+- **Why it wins here:** Every endpoint is I/O bound on Redis. One uvicorn event loop interleaves thousands of in-flight requests on a single core; Flask would need threads (more memory, context-switch cost).
+- **Tradeoff accepted:** Async discipline everywhere (one blocking call ruins the event loop), Pydantic 2 startup overhead.
+- **In production:** Same. FastAPI is the right call for any I/O-bound HTTP service.
+
+### Task state store — Redis hash, not Postgres
+
+- **Chosen:** `state:{task_id}` hash in Redis (qc, status, result, attempts, timestamps).
+- **Rejected:** Postgres row.
+- **Why:** Five fields, no rich-query needs, lifetime ≤ 24 h. Adding a second datastore is over-engineering for this shape.
+- **Tradeoff accepted:** No SQL analytics ("tasks by user, by hour"); durability bounded by Redis AOF rather than Postgres WAL + replication.
+- **In production:** Move state to **Postgres** once any of these hit — retention beyond 24 h, audit/compliance requirements, analytical queries, or the team wants Adminer/pgAdmin instead of `redis-cli`. The swap point is `process_task`: replace `r.hset` with `db.execute(...)`.
+
+### No-task-loss mechanism — sweeper + XAUTOCLAIM over the PEL
+
+- **Chosen:** Background sweeper claims entries idle > 10 s via `XAUTOCLAIM`, re-runs them through `process_task`. Per-task `attempts` counter caps retries at 3.
+- **Rejected:** Manual retry queue in Postgres (more correct, more code); distributed locks (irrelevant — at-least-once + consumer-side idempotency is the standard pattern).
+- **Tradeoff accepted:** Recovery latency = `SWEEPER_IDLE_MS` + `SWEEPER_INTERVAL_S` (~12 s by default). Not "instant" — but workers are expected to take seconds to minutes, so the floor is fine.
+- **In production:** Raise `SWEEPER_IDLE_MS` to **60–120 s** so a routine GC pause or network blip doesn't trigger a reclaim storm; add a **`tasks:dead` DLQ stream** so `max_retries_exceeded` tasks are inspectable without scanning `state:*` keys.
+
+### Notification model — client polls, no push
+
+- **Chosen:** Client calls `GET /tasks/{id}` periodically until `status != "pending"`.
+- **Rejected:** Webhook callback, WebSocket, Server-Sent Events.
+- **Why it wins here:** Simulations finish in seconds; each `HGETALL` is ~100 µs; polling load on Redis is trivial up to thousands of concurrent clients.
+- **Tradeoff accepted:** Wasted Redis reads; client carries polling logic and timeout.
+- **In production (in order of effort):**
+  - **Long polling** first — `GET /tasks/{id}?wait=30s` holds the request open and returns when a status change is signaled via a per-task notify-stream. 30× fewer Redis calls than 1 Hz polling.
+  - **SSE** (`GET /tasks/{id}/events`) for browser clients — one persistent connection per active task, works through HTTP proxies.
+  - **Webhook callbacks** for machine-to-machine + long jobs — `POST /tasks { callback_url, ... }`; worker `POST`s the result. Needs HMAC signing, idempotent receivers, and retry-on-callback-failure.
+
+### Container image — one Dockerfile shared by three services
+
+- **Chosen:** Single Python image; `api` / `worker` / `sweeper` differ only by `command:` in compose.
+- **Rejected:** Three separate Dockerfiles.
+- **Why it wins:** One layer cache, one `pip install`, one image to scan for CVEs, one place to update Python or pin a dep.
+- **Tradeoff accepted:** Each container ships some unused code (worker code in the api container). Negligible — Python source is small.
+- **In production:** Stay single-image **until dependency sets diverge** (e.g., a GPU-enabled worker variant pulling in CUDA libraries that the api shouldn't carry). At that point, split with a multi-stage Dockerfile sharing a `base` stage.
+
+### Persistence — Redis AOF, not RDB snapshots
+
+- **Chosen:** `--appendonly yes` (every write appended to a log; default `appendfsync everysec`).
+- **Rejected:** RDB-only (periodic snapshots → data loss up to the snapshot interval on `kill -9`).
+- **Why:** A task we just accepted (`202`) must not vanish on a redis-server SIGKILL.
+- **Tradeoff accepted:** Larger disk usage, slightly slower writes.
+- **In production:** Same, plus **S3-backed AOF backup** (cron `aws s3 cp /data/appendonly.aof s3://...`) and either **Redis Sentinel** for HA or a managed offering (**ElastiCache**, **Upstash**) for cross-region failover.
+
+### Observability — Prometheus + Grafana + structlog JSON
+
+- **Chosen:** Pull-based Prometheus metrics; structlog JSON to stdout; provisioned Grafana dashboard.
+- **Rejected:** OpenTelemetry + Tempo/Jaeger (gold-plating for a one-hop synchronous flow), ELK with Logstash (1 GB JVM grok tax for already-JSON logs).
+- **Tradeoff accepted:** No distributed-trace spans; correlation done by `task_id` propagated through `structlog.contextvars`.
+- **In production:**
+  - Add **OTel SDK + a tracing backend** (Tempo, Honeycomb, Datadog) the moment a second service hop appears (LLM call, transpiler service).
+  - Ship logs via **Filebeat → Elasticsearch** ingest pipeline (skip Logstash — the JSON is already structured).
+  - Replace local Prometheus with **managed long-term storage** (Grafana Cloud Mimir, Thanos) for retention beyond 24 h.
+  - Add **alert rules** in Prometheus: queue depth > 10 k for 2 min, `task_p95` > 30 s for 5 min, `stream_pending` > 100 for 5 min.
+
+### Unit tests — fakeredis, not testcontainers
+
+- **Chosen:** `fakeredis.aioredis.FakeRedis()` injected via FastAPI's `dependency_overrides`.
+- **Rejected:** A real Redis container per test (testcontainers).
+- **Why it wins:** ~10× faster (24 tests in 0.6 s vs. ~30 s with containers); deterministic; no Docker dependency for unit-level CI.
+- **Tradeoff accepted:** Tests verify behavior against an emulator. Some commands (notably `XAUTOCLAIM` semantics) can drift between fakeredis and real Redis versions.
+- **Mitigation:** `tests/test_chaos.py` (opt-in via `--run-chaos`) hits the **real** stack — any fakeredis/real-Redis behavior gap surfaces there.
 
 ---
 
@@ -459,26 +531,86 @@ What happens when the world misbehaves:
 | Submitted task takes > 3 attempts to complete | After the 4th delivery, `process_task` transitions state to `failed` with `max_retries_exceeded`. Stops the retry loop, surfaces through `GET`. |
 | All workers down for an extended window | New submissions queue on the stream. Sweeper alone won't help (it only reclaims from PEL, not the stream). Workers process the backlog when they come back. |
 
-## Future work
+## Production hardening (what we'd do differently)
 
-Things deliberately deferred for the 48-hour scope:
+Beyond the per-decision "in production" notes above, these are capabilities
+deliberately left out of the 48-hour scope. Grouped by category and ordered
+by likely first need.
 
-- **Task state in Postgres.** Today Redis is the source of truth. At scale,
-  audit/retention/queryability move state to Postgres, leaving Redis Streams
-  as transport only. The `process_task` boundary is the swap point.
-- **Distributed tracing.** OTel SDK + Tempo would replace correlation-by-log
-  with proper spans. Worth it once there are multiple service hops.
-- **Authn/z + rate limiting.** Out of scope for this brief.
-- **Kubernetes manifests.** Compose is what's asked for; the service
-  topology (1 stateless API tier, N stateless workers, 1+ sweeper,
-  managed Redis) maps to a Deployment + HPA per service.
-- **DLQ retention.** Today `max_retries_exceeded` tasks remain in the state
-  hash with status=failed. A dedicated `tasks:dead` stream would let
-  ops re-trigger after investigation.
-- **ELK ingestion.** JSON logs are ready; production would ship via
-  Filebeat → Elasticsearch ingest pipeline (skipping Logstash).
-- **Per-worker process metrics.** `prometheus_client.process_collector`
-  would add memory/cpu/fd metrics per service.
+### Client experience
+
+- **Long polling first**, then SSE for browsers, then webhook callbacks for
+  machine-to-machine — see the "Notification model" decision above. The
+  per-task notify side-stream is published from `process_task` after the
+  terminal `HSET`.
+- **Result TTL.** `EXPIRE state:{id} 86400` after `completed`/`failed`.
+  Today `state:*` keys grow without bound (~2.6 KB/task, ~24 h headroom
+  on a 32 GB host at 320 tasks/s).
+- **Large-result offloading.** If circuits start producing 100 MB
+  histograms, write to S3 and store the URL in the hash. Today the
+  `result` JSON lives in-line (fine for thousand-key counts; not for
+  millions).
+- **API versioning.** `/v1/tasks` path prefix; the unversioned shape today
+  is fine for an assignment but ties us to it.
+
+### Reliability & disaster recovery
+
+- **DLQ stream** (`tasks:dead`). `max_retries_exceeded` tasks flow here
+  for inspection and manual replay. Today they sit in `state:*` with
+  status=failed — discoverable only via `KEYS state:*` or a `SCAN`.
+- **Multi-region.** Redis AOF replicated cross-region (Sentinel,
+  ElastiCache global datastore, or Upstash global). The state hash +
+  stream both live in Redis, so it's one component to replicate.
+- **Stuck-worker detection.** Alert on absence of `worker.alive` logs
+  for > 30 s — orthogonal to the sweeper, which only catches *in-flight*
+  tasks, not "all workers offline."
+- **Pod Disruption Budget** + `terminationGracePeriodSeconds` if moving
+  to Kubernetes (analogous to compose's `stop_grace_period: 60s`).
+
+### Security & multi-tenancy
+
+- **AuthN/Z.** API keys minimum; JWT/mTLS for service-to-service.
+  `/metrics`, `/healthz`, `/readyz` stay unauthenticated by convention.
+- **Per-client rate limiting.** Redis token bucket
+  (`INCR rate:{api_key}:{minute}` + `EXPIRE`). Stops one runaway client
+  from saturating the worker pool and the queue.
+- **Backpressure on POST.** Today `XADD ... maxlen=100_000` silently
+  evicts oldest entries. Production: reject with `429` once
+  `XLEN > threshold` rather than dropping.
+- **HTTP status realignment.** Today `Task not found` returns
+  `200 + status:error` (assignment's literal shape). Production: `404`
+  for the not-found case, `200` only for actual results.
+- **Audit logging.** Who submitted what, when. Today's structlog has the
+  info; production needs a retention policy + immutable destination.
+
+### Operational tooling
+
+- **Distributed tracing.** OTel SDK + Tempo / Honeycomb / Datadog. Worth
+  it the moment a second hop appears (LLM, transpiler, anything async
+  outside Aer).
+- **Per-process metrics.** `prometheus_client.process_collector` adds
+  memory / CPU / fds per service — useful for catching slow leaks before
+  they OOM the container.
+- **Pre-built alert rules.** Today the Grafana dashboard is for
+  inspection only. Production needs Prometheus alert rules on
+  `XLEN`, `task_duration_seconds` p95, and `stream_pending`.
+- **Kubernetes manifests.** Compose maps cleanly: Deployment per service,
+  HPA on workers driven by **queue depth** via KEDA (not CPU — a worker
+  blocked on `XREADGROUP` shows 0% CPU even when 10 k tasks are queued).
+- **CI/CD.** Lint + type check + pytest in CI (GitHub Actions), build &
+  push image on tag, deploy via ArgoCD or similar. Today everything
+  runs locally.
+
+### Cost & efficiency
+
+- **GPU-backed worker variant** for circuits beyond ~15 qubits — Qiskit
+  Aer supports GPU. Today CPU only; 25-qubit circuits would be effectively
+  unrunnable.
+- **Result caching** keyed by `hash(qc, shots)`. Deterministic circuits
+  with a fixed seed don't need re-execution. Saves CPU on repeat
+  submissions; needs care around `random_seed`.
+- **Autoscaling workers** on queue depth via KEDA — scales pods up under
+  burst, down to a floor during idle hours.
 
 ---
 
